@@ -1,0 +1,195 @@
+/* Copyright (c) 2026 Mana Nekoha
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. https://mozilla.org/MPL/2.0/ */
+
+import { DEFAULT_STATE, EXTENSION_ID, isGoogleSource } from './constants.js';
+import { createRequestHook, installFailureSink } from './request-hook.js';
+import { normalizeState, requiresPlugin } from './state-machine.js';
+import { enrichGemini4ModelList, getGemini4RequestTarget, isNativeGemini4Request } from './gemini4-request.js';
+import { createGemini4SignatureTracker } from './gemini4-signatures.js';
+
+const REQUEST_STATE = '__vertexPayGoRequestState';
+const GENERATE_PATH = '/api/backends/chat-completions/generate';
+
+// Carry state on each request, rather than in shared mutable state: background
+// profile requests may overlap each other and normal chat requests.
+function markRequest(data, state, origin, protect = true) {
+    const marked = { ...data, [REQUEST_STATE]: { state: normalizeState(state) } };
+    if (protect && isGoogleSource(data.chat_completion_source) && requiresPlugin(state, data.chat_completion_source, data.model)) {
+        marked[REQUEST_STATE].originalReverseProxy = data.reverse_proxy;
+        marked[REQUEST_STATE].originalProxyPassword = data.proxy_password;
+        installFailureSink(marked, origin);
+        marked[REQUEST_STATE].sink = marked.reverse_proxy;
+    }
+    return marked;
+}
+
+function presetState(context, name) {
+    if (!name) return DEFAULT_STATE;
+    const preset = context.getPresetManager?.('openai')?.getCompletionPresetByName?.(name);
+    // A missing named preset cannot safely be interpreted as Standard.
+    if (!preset) throw new Error(`[Vertex PayGo] Cannot resolve request preset: ${name}`);
+    return preset.extensions?.[EXTENSION_ID] ?? DEFAULT_STATE;
+}
+
+export function installRequestTransport({ context, stateProvider, target = globalThis, captureUsageContext = () => null,
+    getUsagePrice = () => null, messageCosts, ...hookOptions }) {
+    const origin = hookOptions.origin ?? target.location?.origin;
+    const originalFetch = target.fetch;
+    if (typeof originalFetch !== 'function') throw new TypeError('fetch is required.');
+    const requestStates = new WeakMap();
+    const requestUsage = new WeakMap();
+    const signatures = createGemini4SignatureTracker({ context,
+        getContext: () => target.SillyTavern?.getContext?.() ?? context });
+    // Presentation/telemetry must never prevent a generation or change its route.
+    const observe = (method, ...args) => {
+        try { return messageCosts?.[method]?.(...args); }
+        catch (error) { console.warn('[Vertex PayGo] Message cost observation failed.', error); }
+    };
+    const prepareRequest = createRequestHook({ ...hookOptions, origin,
+        usageProvider: data => requestUsage.get(data) ?? {},
+        stateProvider: data => requestStates.get(data) });
+
+    const onSettingsReady = data => {
+        if (!isGoogleSource(data?.chat_completion_source)) return;
+        const background = data[REQUEST_STATE]?.background === true;
+        if (background) return;
+        Object.assign(data, markRequest(data, stateProvider(), origin));
+        data[REQUEST_STATE].usageChatId = captureUsageContext();
+        data[REQUEST_STATE].background = background;
+        data[REQUEST_STATE].messageCostToken = background ? null
+            : observe('capture', data, data[REQUEST_STATE].usageChatId) ?? null;
+    };
+
+    target.fetch = async function payGoFetch(input, init) {
+        const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url, origin);
+        const method = init?.method ?? input?.method ?? 'GET';
+        if (url.origin === origin && url.pathname === '/api/backends/chat-completions/status'
+            && method.toUpperCase() === 'POST') {
+            const body = init?.body ?? (typeof input?.clone === 'function' ? await input.clone().text() : undefined);
+            let google = false;
+            try { google = isGoogleSource(JSON.parse(body).chat_completion_source); } catch { /* Keep host validation. */ }
+            const response = await originalFetch.call(this, input, init);
+            return google ? enrichGemini4ModelList(response) : response;
+        }
+        if (url.origin !== origin || url.pathname !== GENERATE_PATH || method.toUpperCase() !== 'POST') {
+            return originalFetch.call(this, input, init);
+        }
+        const signal = init?.signal ?? input?.signal;
+        signal?.throwIfAborted();
+        // Capture before async Request body/preset/credential work: switching
+        // chats while a request is in flight must never move its charge.
+        const fallbackChatId = captureUsageContext();
+        const rawBody = init?.body ?? (typeof input?.clone === 'function' ? await input.clone().text() : undefined);
+        // Host generation requests use JSON strings; reject unexpected formats
+        // instead of silently letting a paid request bypass preparation.
+        if (typeof rawBody !== 'string') throw new TypeError('[Vertex PayGo] Expected a JSON generation request.');
+        const data = JSON.parse(rawBody);
+        const metadata = data[REQUEST_STATE];
+        if (!metadata && !isGoogleSource(data.chat_completion_source)) {
+            return originalFetch.call(this, input, init);
+        }
+        delete data[REQUEST_STATE];
+        const state = metadata?.state ?? stateProvider();
+        if (metadata?.sink && data.reverse_proxy === metadata.sink) {
+            data.reverse_proxy = metadata.originalReverseProxy ?? '';
+            data.proxy_password = metadata.originalProxyPassword ?? '';
+        }
+        requestStates.set(data, state);
+        const usageChatId = metadata && Object.hasOwn(metadata, 'usageChatId')
+            ? metadata.usageChatId : fallbackChatId;
+        requestUsage.set(data, {
+            ...(usageChatId ? { usageChatId } : {}),
+            usagePrice: getUsagePrice(data, state),
+        });
+        const costToken = metadata?.messageCostToken;
+        const signatureToken = isNativeGemini4Request(data) ? signatures.capture(data, metadata?.background) : null;
+        let requestTarget = input;
+        try {
+            const prepared = await prepareRequest(data);
+            if (isNativeGemini4Request(data)) {
+                if (prepared?.nativeGemini4 !== true) {
+                    const message = hookOptions.localize?.('vertex_paygo.gemini4.server_upgrade')
+                        ?? 'Gemini 4 compatibility requires the updated server plugin. Update the server plugin and restart SillyTavern.';
+                    throw Object.assign(new Error(message), { code: 'GEMINI4_SERVER_UPGRADE_REQUIRED' });
+                }
+                data.native_gemini_api_version = prepared.nativeGeminiApiVersion;
+                requestTarget = getGemini4RequestTarget(input, origin);
+            }
+            if (costToken) observe('prepared', costToken, prepared?.usageId, {
+                chatId: usageChatId, model: data.model, source: data.chat_completion_source,
+                tier: state.tier, stream: Boolean(data.stream), price: requestUsage.get(data).usagePrice,
+            });
+        } catch (error) {
+            if (costToken) observe('failed', costToken);
+            throw error;
+        } finally {
+            requestStates.delete(data);
+            requestUsage.delete(data);
+        }
+        try {
+            signal?.throwIfAborted();
+            if (costToken) observe('started', costToken);
+            const response = await originalFetch.call(this, requestTarget, { ...init, body: JSON.stringify(data) });
+            if (signatureToken) {
+                try { await signatures.observe(signatureToken, response); }
+                catch (error) { console.warn('[Vertex PayGo] Could not preserve the native Gemini signature.', error); }
+            }
+            return costToken ? observe('response', costToken, response, signal) ?? response : response;
+        } catch (error) {
+            if (costToken) observe('failed', costToken);
+            throw error;
+        }
+    };
+
+    const service = context.ChatCompletionService;
+    if (service) {
+        const processRequest = service.processRequest;
+        const sendRequest = service.sendRequest;
+        service.processRequest = async function (data, options = {}, ...args) {
+            if (data.chat_completion_source && !isGoogleSource(data.chat_completion_source)) {
+                return processRequest.call(this, data, options, ...args);
+            }
+            const marked = data[REQUEST_STATE] ? data : markRequest(data,
+                // A sink here would override a proxy inherited from the preset
+                // before the host merges it. This API propagates errors itself.
+                presetState(context, options.presetName), origin, false);
+            marked[REQUEST_STATE].background = true;
+            marked[REQUEST_STATE].messageCostToken = null;
+            if (!Object.hasOwn(marked[REQUEST_STATE], 'usageChatId')) {
+                marked[REQUEST_STATE].usageChatId = captureUsageContext();
+            }
+            return processRequest.call(this, marked, options, ...args);
+        };
+        service.sendRequest = async function (data, ...args) {
+            if (!isGoogleSource(data.chat_completion_source)) return sendRequest.call(this, data, ...args);
+            const marked = data[REQUEST_STATE] ? data : markRequest(data,
+                data.extensions?.[EXTENSION_ID] ?? DEFAULT_STATE, origin);
+            marked[REQUEST_STATE].background = true;
+            marked[REQUEST_STATE].messageCostToken = null;
+            if (!Object.hasOwn(marked[REQUEST_STATE], 'usageChatId')) {
+                marked[REQUEST_STATE].usageChatId = captureUsageContext();
+            }
+            return sendRequest.call(this, marked, ...args);
+        };
+    }
+
+    const manager = context.ConnectionManagerRequestService;
+    if (manager) {
+        const sendRequest = manager.sendRequest;
+        manager.sendRequest = async function (profileId, prompt, maxTokens, custom = {}, overridePayload = {}) {
+            const profile = this.getProfile(profileId);
+            if (profile?.mode !== 'cc' || !isGoogleSource(profile.api)) {
+                return sendRequest.call(this, profileId, prompt, maxTokens, custom, overridePayload);
+            }
+            const state = profile?.[EXTENSION_ID] ?? presetState(context,
+                custom.includePreset === false ? undefined : profile?.preset);
+            // The host adds provider/model before merging overridePayload. Do
+            // not insert a sink here: validation must see its final proxy too.
+            return sendRequest.call(this, profileId, prompt, maxTokens, custom, {
+                ...overridePayload, [REQUEST_STATE]: { state: normalizeState(state), usageChatId: captureUsageContext(), background: true },
+            });
+        };
+    }
+    return onSettingsReady;
+}

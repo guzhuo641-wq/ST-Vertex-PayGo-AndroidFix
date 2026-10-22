@@ -1,0 +1,517 @@
+/*
+ * Copyright (c) 2026 Mana Nekoha
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+import {
+    CLIENT_LOG_MEDIA_TYPE,
+    HEALTH_TIMEOUT_MS,
+    EXTENSION_ID,
+    LOG_TIMEOUT_MS,
+    MAX_LOG_RESPONSE_BYTES,
+    MAX_BRIDGE_LOG_RESPONSE_BYTES,
+    BRIDGE_LOG_TIMEOUT_MS,
+    PREPARE_TIMEOUT_MS,
+    PROTOCOL_VERSION,
+    UPDATE_CHECK_TIMEOUT_MS,
+    UPDATE_START_TIMEOUT_MS,
+    UPDATE_STATUS_TIMEOUT_MS,
+    REQUIRED_TRANSPORT,
+    SERVER_ROUTES,
+} from './constants.js';
+
+export class ServerPluginError extends Error {
+    constructor(message, { code = 'SERVER_PLUGIN_ERROR', status, serverCode, responseFormat, cause } = {}) {
+        super(message, { cause });
+        this.name = 'ServerPluginError';
+        this.code = code;
+        this.status = status;
+        this.serverCode = serverCode;
+        this.responseFormat = responseFormat;
+    }
+}
+
+export function parseLoopbackProxyUrl(value) {
+    let url;
+    try {
+        url = new URL(String(value));
+    } catch (cause) {
+        throw new ServerPluginError('Server Plugin returned an invalid proxy URL.', {
+            code: 'INVALID_PROXY_URL',
+            cause,
+        });
+    }
+
+    // The Server Plugin chooses the ticket length. Require a bounded base64url
+    // token here, then bind it exactly to data.ticket in prepare().
+    const validPath = /^\/proxy\/[A-Za-z0-9_-]{16,128}$/.test(url.pathname);
+    if (
+        url.protocol !== 'http:'
+        || url.hostname !== '127.0.0.1'
+        || !url.port
+        || url.username
+        || url.password
+        || !validPath
+        || url.search
+        || url.hash
+    ) {
+        throw new ServerPluginError('Server Plugin proxy URL is not an authenticated loopback HTTP endpoint.', {
+            code: 'UNSAFE_PROXY_URL',
+        });
+    }
+
+    return url.toString();
+}
+
+// Error pages can come from SillyTavern or an upstream reverse proxy. Read only
+// a bounded prefix and never expose arbitrary HTML in a user-facing message.
+const MAX_ERROR_RESPONSE_BYTES = 16 * 1024;
+
+async function readHttpError(response) {
+    let data;
+    let text = '';
+    try {
+        if (response.body?.getReader) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let remaining = MAX_ERROR_RESPONSE_BYTES;
+            try {
+                while (remaining > 0) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const prefix = value.subarray(0, remaining);
+                    text += decoder.decode(prefix, { stream: true });
+                    remaining -= prefix.byteLength;
+                }
+                text += decoder.decode();
+            } finally {
+                await reader.cancel();
+                reader.releaseLock();
+            }
+            try { data = JSON.parse(text); } catch { /* HTML or other error body. */ }
+        } else if (typeof response.text === 'function') {
+            text = String(await response.text()).slice(0, MAX_ERROR_RESPONSE_BYTES);
+            try { data = JSON.parse(text); } catch { /* Non-JSON error body. */ }
+        } else {
+            // Support minimal host adapters that expose only json().
+            data = await response.json();
+        }
+    } catch (cause) {
+        if (cause?.name === 'AbortError') throw cause;
+        // An unreadable error body must not hide the HTTP failure status.
+    }
+    if (response.status === 403 && /\bInvalid CSRF token\b/iu.test(text)) {
+        return new ServerPluginError('SillyTavern rejected the CSRF token (HTTP 403). Refresh the page and try again.', {
+            code: 'CSRF_REJECTED', status: response.status,
+        });
+    }
+    const message = typeof data?.message === 'string' && data.message.trim()
+        ? data.message : `Server Plugin request failed (HTTP ${response.status}); no JSON error details were returned.`;
+    return new ServerPluginError(message, {
+        code: 'HTTP_ERROR', status: response.status,
+        serverCode: typeof data?.code === 'string' ? data.code : undefined,
+        responseFormat: data === undefined ? 'non-json' : 'json',
+    });
+}
+
+async function fetchJson(fetchImpl, url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetchImpl(url, { ...options, signal: controller.signal });
+        if (!response.ok) throw await readHttpError(response);
+        let data;
+        try {
+            data = await response.json();
+        } catch (cause) {
+            if (cause?.name === 'AbortError') throw cause;
+            throw new ServerPluginError('Server Plugin returned a non-JSON response.', {
+                code: 'INVALID_RESPONSE',
+                status: response.status,
+                cause,
+            });
+        }
+
+        return data;
+    } catch (error) {
+        if (error instanceof ServerPluginError) {
+            throw error;
+        }
+        if (error?.name === 'AbortError') {
+            throw new ServerPluginError('Server Plugin request timed out.', { code: 'TIMEOUT', cause: error });
+        }
+        throw new ServerPluginError('Server Plugin is unavailable.', { code: 'UNAVAILABLE', cause: error });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function fetchText(fetchImpl, url, options, timeoutMs, {
+    maxBytes = MAX_LOG_RESPONSE_BYTES,
+    contentTypePattern = /^text\/plain(?:\s*;|$)/iu,
+} = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetchImpl(url, { ...options, signal: controller.signal });
+        const contentLength = Number(response.headers?.get?.('content-length'));
+        if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+            controller.abort();
+            throw new ServerPluginError('Server Plugin log response is too large.', {
+                code: 'LOG_TOO_LARGE',
+                status: response.status,
+            });
+        }
+
+        let data;
+        try {
+            if (response.body && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let totalBytes = 0;
+                let text = '';
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    totalBytes += value.byteLength;
+                    if (totalBytes > maxBytes) {
+                        await reader.cancel();
+                        throw new ServerPluginError('Server Plugin log response is too large.', {
+                            code: 'LOG_TOO_LARGE',
+                            status: response.status,
+                        });
+                    }
+                    text += decoder.decode(value, { stream: true });
+                }
+                data = text + decoder.decode();
+            } else {
+                data = await response.text();
+                const byteLength = typeof TextEncoder === 'function'
+                    ? new TextEncoder().encode(data).byteLength
+                    : data.length;
+                if (byteLength > maxBytes) {
+                    throw new ServerPluginError('Server Plugin log response is too large.', {
+                        code: 'LOG_TOO_LARGE',
+                        status: response.status,
+                    });
+                }
+            }
+        } catch (cause) {
+            if (cause?.name === 'AbortError') throw cause;
+            if (cause instanceof ServerPluginError) throw cause;
+            throw new ServerPluginError('Server Plugin returned an invalid text response.', {
+                code: 'INVALID_LOG_RESPONSE',
+                status: response.status,
+                cause,
+            });
+        }
+        if (!response.ok) {
+            let message = `Server Plugin request failed (${response.status}).`;
+            try {
+                const parsed = JSON.parse(data);
+                if (typeof parsed?.message === 'string') message = parsed.message;
+            } catch {
+                // Keep the bounded generic message for non-JSON error bodies.
+            }
+            throw new ServerPluginError(message, { code: 'HTTP_ERROR', status: response.status });
+        }
+        const contentType = response.headers?.get?.('content-type');
+        if (contentType && !contentTypePattern.test(contentType)) {
+            throw new ServerPluginError('Server Plugin returned an invalid log content type.', {
+                code: 'INVALID_LOG_RESPONSE',
+                status: response.status,
+            });
+        }
+        return data;
+    } catch (error) {
+        if (error instanceof ServerPluginError) throw error;
+        if (error?.name === 'AbortError') {
+            throw new ServerPluginError('Server Plugin request timed out.', { code: 'TIMEOUT', cause: error });
+        }
+        throw new ServerPluginError('Server Plugin is unavailable.', { code: 'UNAVAILABLE', cause: error });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function sendWithoutBody(fetchImpl, url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetchImpl(url, { ...options, signal: controller.signal });
+        if (!response.ok) {
+            let message = `Server Plugin request failed (${response.status}).`;
+            try {
+                const data = await response.json();
+                if (typeof data?.message === 'string') message = data.message;
+            } catch {
+                // The log transport deliberately ignores non-JSON error details.
+            }
+            throw new ServerPluginError(message, { code: 'HTTP_ERROR', status: response.status });
+        }
+    } catch (error) {
+        if (error instanceof ServerPluginError) throw error;
+        if (error?.name === 'AbortError') {
+            throw new ServerPluginError('Server Plugin request timed out.', { code: 'TIMEOUT', cause: error });
+        }
+        throw new ServerPluginError('Server Plugin is unavailable.', { code: 'UNAVAILABLE', cause: error });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function validateHandshake(data) {
+    if (data?.ok !== true || data?.pluginId !== EXTENSION_ID || data?.protocolVersion !== PROTOCOL_VERSION) {
+        throw new ServerPluginError(`Server Plugin protocol v${PROTOCOL_VERSION} is required.`, {
+            code: 'PROTOCOL_MISMATCH',
+        });
+    }
+    if (data.transport !== REQUIRED_TRANSPORT) {
+        throw new ServerPluginError(`Server Plugin transport “${REQUIRED_TRANSPORT}” is required.`, {
+            code: 'TRANSPORT_MISMATCH',
+        });
+    }
+    return data;
+}
+
+export function createServerClient({ fetchImpl = globalThis.fetch, getRequestHeaders = () => ({}) } = {}) {
+    if (typeof fetchImpl !== 'function') {
+        throw new TypeError('A fetch implementation is required.');
+    }
+
+    async function fetchBridgeLogs(url, method) {
+        const text = await fetchText(fetchImpl, url, {
+            method, headers: { ...getRequestHeaders(), Accept: 'application/json',
+                ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+            ...(method === 'POST' ? { body: '{}' } : {}), cache: 'no-store',
+        }, BRIDGE_LOG_TIMEOUT_MS, { maxBytes: MAX_BRIDGE_LOG_RESPONSE_BYTES,
+            contentTypePattern: /^application\/json(?:\s*;|$)/iu });
+        let data;
+        try { data = JSON.parse(text); } catch (cause) {
+            throw new ServerPluginError('Invalid bridge API log response.', { code: 'INVALID_BRIDGE_LOG_RESPONSE', cause });
+        }
+        if (data?.ok !== true || !Array.isArray(data.entries)
+            || data.entries.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry))
+            || (method === 'POST' && data.entries.length !== 0)) {
+            throw new ServerPluginError('Invalid bridge API log response.', { code: 'INVALID_BRIDGE_LOG_RESPONSE' });
+        }
+        return data;
+    }
+
+    return {
+        async readActiveGoogleSecretId(source) {
+            const secretKey = source === 'makersuite' ? 'api_key_makersuite'
+                : source === 'vertexai' ? 'vertexai_service_account_json' : null;
+            if (!secretKey) throw new TypeError('A Google source is required.');
+            const data = await fetchJson(fetchImpl, '/api/secrets/read', {
+                method: 'POST',
+                headers: { ...getRequestHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: '{}',
+                cache: 'no-store',
+            }, HEALTH_TIMEOUT_MS);
+            const entries = data?.[secretKey];
+            if (entries === true) return null; // Legacy host: server snapshots the active credential.
+            if (!Array.isArray(entries)) {
+                throw new ServerPluginError('No active Google credential is available.', { code: 'ACTIVE_GOOGLE_SECRET_UNAVAILABLE' });
+            }
+            const active = entries.filter(entry => entry?.active === true);
+            if (active.length !== 1 || typeof active[0].id !== 'string'
+                || !/^[A-Za-z0-9_-]{1,128}$/u.test(active[0].id)) {
+                throw new ServerPluginError('No valid active Google credential is available.', { code: 'ACTIVE_GOOGLE_SECRET_UNAVAILABLE' });
+            }
+            return active[0].id;
+        },
+
+        async readOpenAiBridge() {
+            return await fetchJson(fetchImpl, SERVER_ROUTES.OPENAI_BRIDGE, {
+                method: 'GET',
+                headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                cache: 'no-store',
+            }, HEALTH_TIMEOUT_MS);
+        },
+
+        async readOpenAiBridgeLogs() {
+            return await fetchBridgeLogs(SERVER_ROUTES.OPENAI_BRIDGE_LOGS, 'GET');
+        },
+
+        async clearOpenAiBridgeLogs() {
+            return await fetchBridgeLogs(SERVER_ROUTES.OPENAI_BRIDGE_LOGS_CLEAR, 'POST');
+        },
+
+        async updateOpenAiBridge(payload) {
+            return await fetchJson(fetchImpl, SERVER_ROUTES.OPENAI_BRIDGE, {
+                method: 'POST',
+                headers: { ...getRequestHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                cache: 'no-store',
+            }, PREPARE_TIMEOUT_MS);
+        },
+
+        async checkHealth() {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.HEALTH, {
+                method: 'GET',
+                headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                cache: 'no-store',
+            }, HEALTH_TIMEOUT_MS);
+            return validateHandshake(data);
+        },
+
+        async prepare(payload) {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.PREPARE, {
+                method: 'POST',
+                headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                body: JSON.stringify(payload),
+                cache: 'no-store',
+            }, PREPARE_TIMEOUT_MS);
+
+            validateHandshake(data);
+            const proxyUrl = parseLoopbackProxyUrl(data.proxyUrl);
+            const ticket = new URL(proxyUrl).pathname.split('/').at(-1);
+            if (data.ticket !== ticket) {
+                throw new ServerPluginError('Server Plugin ticket does not match its proxy URL.', {
+                    code: 'INVALID_PROXY_TICKET',
+                });
+            }
+            if (typeof data.proxySecret !== 'string' || data.proxySecret.length < 16) {
+                throw new ServerPluginError('Server Plugin returned an invalid proxy secret.', {
+                    code: 'INVALID_PROXY_SECRET',
+                });
+            }
+
+            return {
+                ...data,
+                proxyUrl,
+                proxySecret: data.proxySecret,
+            };
+        },
+
+        async checkUpdate() {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.UPDATE, {
+                method: 'GET',
+                headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                cache: 'no-store',
+            }, UPDATE_CHECK_TIMEOUT_MS);
+            if (data?.ok !== true || !['update-available', 'up-to-date', 'blocked'].includes(data.status) || !Array.isArray(data.components)) {
+                throw new ServerPluginError('Server Plugin returned an invalid update check.', { code: 'INVALID_UPDATE_RESPONSE' });
+            }
+            return data;
+        },
+
+        async listDataBackups(cursor = null) {
+            const url = SERVER_ROUTES.DATA_BACKUPS + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : '');
+            const data = await fetchJson(fetchImpl, url, {
+                method: 'GET', headers: { ...getRequestHeaders(), Accept: 'application/json' }, cache: 'no-store',
+            }, UPDATE_START_TIMEOUT_MS);
+            if (data?.ok !== true || !Array.isArray(data.entries) || data.entries.some(entry => typeof entry.id !== 'string'
+                || typeof entry.restorable !== 'boolean' || entry.createdAt !== null && !Number.isFinite(Date.parse(entry.createdAt))
+                || !Array.isArray(entry.files) || entry.files.some(name => !['usage-ledger.jsonl', 'openai-bridge-state.json'].includes(name))
+                || entry.reason !== null && !['startup', 'update', 'before-restore'].includes(entry.reason))
+                || data.pending !== null && (!data.pending || !['queued', 'applying', 'restored', 'failed'].includes(data.pending.status))
+                || data.nextCursor !== null && typeof data.nextCursor !== 'string') {
+                throw new ServerPluginError('Server Plugin returned an invalid backup list.', { code: 'INVALID_BACKUP_RESPONSE' });
+            }
+            return data;
+        },
+
+        async scheduleDataRestore(backupId) {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.DATA_RESTORE, {
+                method: 'POST', headers: { ...getRequestHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: JSON.stringify({ backupId }), cache: 'no-store',
+            }, UPDATE_START_TIMEOUT_MS);
+            if (data?.ok !== true || data.restartRequired !== true) throw new ServerPluginError('Data restore was not scheduled.', { code: 'INVALID_BACKUP_RESPONSE' });
+            return data;
+        },
+
+        async cancelDataRestore() {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.DATA_RESTORE_CANCEL, {
+                method: 'POST', headers: { ...getRequestHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' }, body: '{}', cache: 'no-store',
+            }, UPDATE_START_TIMEOUT_MS);
+            if (data?.ok !== true) throw new ServerPluginError('Data restore was not cancelled.', { code: 'INVALID_BACKUP_RESPONSE' });
+            return data;
+        },
+
+        async startUpdate() {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.UPDATE, {
+                method: 'POST',
+                headers: { ...getRequestHeaders(), Accept: 'application/json', 'Content-Type': 'application/json' },
+                body: '{}',
+                cache: 'no-store',
+            }, UPDATE_START_TIMEOUT_MS);
+            if (data?.ok !== true || data.started !== true) {
+                throw new ServerPluginError('Server Plugin did not start the update.', { code: 'INVALID_UPDATE_RESPONSE' });
+            }
+            return data;
+        },
+
+        async readUpdateStatus() {
+            const data = await fetchJson(fetchImpl, SERVER_ROUTES.UPDATE_STATUS, {
+                method: 'GET',
+                headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                cache: 'no-store',
+            }, UPDATE_STATUS_TIMEOUT_MS);
+            if (data?.ok !== true || typeof data.running !== 'boolean') {
+                throw new ServerPluginError('Server Plugin returned an invalid update status.', { code: 'INVALID_UPDATE_RESPONSE' });
+            }
+            return data;
+        },
+
+        async readLogs() {
+            return await fetchText(fetchImpl, SERVER_ROUTES.LOGS, {
+                method: 'GET',
+                headers: { ...getRequestHeaders(), Accept: 'text/plain' },
+                cache: 'no-store',
+            }, LOG_TIMEOUT_MS);
+        },
+
+        async readUsage(chatId) {
+            if (typeof chatId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(chatId)) {
+                throw new TypeError('A valid conversation usage ID is required.');
+            }
+            const records = [];
+            const cursors = new Set();
+            let cursor;
+            let truncated = false;
+            do {
+                const suffix = cursor === undefined ? '' : `&cursor=${encodeURIComponent(cursor)}`;
+                const data = await fetchJson(fetchImpl, `${SERVER_ROUTES.USAGE}?chatId=${encodeURIComponent(chatId)}${suffix}`, {
+                    method: 'GET',
+                    headers: { ...getRequestHeaders(), Accept: 'application/json' },
+                    cache: 'no-store',
+                }, LOG_TIMEOUT_MS);
+                if (data?.ok !== true || !Array.isArray(data.records)) {
+                    throw new ServerPluginError('Invalid usage ledger response.', { code: 'INVALID_USAGE_RESPONSE' });
+                }
+                records.push(...data.records);
+                cursor = data.nextCursor ?? undefined;
+                // All fetched pages together form the complete ledger.
+                truncated ||= data.truncated === true && cursor === undefined;
+                if (cursor !== undefined) {
+                    if (typeof cursor !== 'string' || cursor.length > 256 || !cursor || cursors.has(cursor)) {
+                        throw new ServerPluginError('Invalid usage ledger cursor.', { code: 'INVALID_USAGE_RESPONSE' });
+                    }
+                    cursors.add(cursor);
+                }
+            } while (cursor !== undefined);
+            return { ok: true, records, truncated };
+        },
+
+        async writeClientLog(entry) {
+            await sendWithoutBody(fetchImpl, SERVER_ROUTES.CLIENT_LOG, {
+                method: 'POST',
+                headers: {
+                    ...getRequestHeaders(),
+                    Accept: 'application/json',
+                    'Content-Type': CLIENT_LOG_MEDIA_TYPE,
+                },
+                body: JSON.stringify(entry),
+                cache: 'no-store',
+            }, LOG_TIMEOUT_MS);
+        },
+    };
+}

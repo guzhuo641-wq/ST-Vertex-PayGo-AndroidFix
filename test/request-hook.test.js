@@ -1,0 +1,336 @@
+/*
+ * Copyright (c) 2026 Mana Nekoha
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { TIER } from '../src/constants.js';
+import {
+    buildPreparePayload,
+    createRequestHook,
+    installFailureSink,
+} from '../src/request-hook.js';
+
+const ORIGIN = 'http://st.local:8000';
+
+function vertexData(overrides = {}) {
+    return {
+        chat_completion_source: 'vertexai',
+        model: 'gemini-3.1-pro-preview',
+        stream: true,
+        vertexai_auth_mode: 'full',
+        vertexai_region: 'global',
+        vertexai_express_project_id: '',
+        ...overrides,
+    };
+}
+
+test('Standard rejects custom reverse proxies before collecting usage', async () => {
+    const data = vertexData({ reverse_proxy: 'https://user-proxy.example' });
+    let prepares = 0;
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.STANDARD, paygoOnly: false }),
+        serverClient: { prepare: async () => prepares++ },
+        origin: ORIGIN,
+    });
+    await assert.rejects(hook(data), { code: 'CUSTOM_REVERSE_PROXY_CONFLICT' });
+    assert.equal(prepares, 0);
+    assert.match(data.reverse_proxy, /^vertex-paygo-blocked:/);
+    assert.equal(Object.hasOwn(data, 'proxy_password'), true);
+});
+
+test('Standard collects usage without changing region or enabling PayGo-only', async () => {
+    const data = vertexData({ vertexai_region: 'europe-west4' });
+    let payload;
+    await createRequestHook({
+        stateProvider: () => ({ tier: TIER.STANDARD, paygoOnly: false }),
+        origin: ORIGIN,
+        serverClient: { prepare: async value => {
+            payload = value;
+            return { proxyUrl: 'http://127.0.0.1:1234/proxy/fixture', proxySecret: 'fixture' };
+        } },
+    })(data);
+    assert.equal(payload.tier, 'standard');
+    assert.equal(payload.paygoOnly, false);
+    assert.equal(payload.vertexai_region, 'europe-west4');
+    assert.equal(data.vertexai_region, 'europe-west4');
+    assert.match(data.reverse_proxy, /127\.0\.0\.1/);
+});
+
+test('a ledger failure warns about incomplete costs without redirecting the prepared generation', async () => {
+    const data = vertexData();
+    const warnings = [];
+    await createRequestHook({ stateProvider: () => ({ tier: TIER.STANDARD }), origin: ORIGIN,
+        usageProvider: () => ({ usageChatId: 'chat-1', usagePrice: null }),
+        notifyWarning: message => warnings.push(message),
+        serverClient: { prepare: async () => ({ usageId: null, proxyUrl: 'http://127.0.0.1:1234/proxy/fixture', proxySecret: 'fixture' }) },
+    })(data);
+    assert.match(data.reverse_proxy, /127\.0\.0\.1/);
+    assert.match(warnings[0], /costs will be incomplete/);
+});
+
+test('non-Vertex sources are untouched even when a PayGo state is selected', async () => {
+    const data = { chat_completion_source: 'custom', model: 'gemini-3.1-pro-preview' };
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.FLEX, paygoOnly: false }),
+        serverClient: { prepare: async () => assert.fail('prepare should not run') },
+        origin: ORIGIN,
+    });
+    await hook(data);
+    assert.equal(Object.hasOwn(data, 'reverse_proxy'), false);
+});
+
+test('installs the failure sink before awaiting prepare and replaces it only after success', async () => {
+    let resolvePrepare;
+    let payload;
+    const preparePromise = new Promise(resolve => { resolvePrepare = resolve; });
+    const data = vertexData();
+    const hook = createRequestHook({
+        stateProvider: () => ({ version: 1, tier: TIER.FLEX, paygoOnly: true }),
+        serverClient: { prepare: value => { payload = value; return preparePromise; } },
+        origin: ORIGIN,
+        secretFactory: () => 'temporary-block-secret',
+    });
+
+    const pending = hook(data);
+    assert.equal(data.reverse_proxy, 'vertex-paygo-blocked://request');
+    assert.equal(data.proxy_password, 'temporary-block-secret');
+
+    resolvePrepare({ proxyUrl: `http://127.0.0.1:32145/proxy/${'a'.repeat(32)}`, proxySecret: 'proxy-secret-value' });
+    await pending;
+    assert.equal(data.reverse_proxy, `http://127.0.0.1:32145/proxy/${'a'.repeat(32)}`);
+    assert.equal(data.proxy_password, 'proxy-secret-value');
+    assert.deepEqual(payload, {
+        protocolVersion: 2,
+        chat_completion_source: 'vertexai',
+        model: 'gemini-3.1-pro-preview',
+        stream: true,
+        vertexai_auth_mode: 'full',
+        vertexai_region: 'global',
+        vertexai_express_project_id: '',
+        tier: TIER.FLEX,
+        paygoOnly: true,
+    });
+});
+
+test('prepare failure retains the failure sink and reports a visible error', async () => {
+    const errors = [];
+    const data = vertexData();
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.PRIORITY, paygoOnly: false }),
+        serverClient: { prepare: async () => { throw new Error('Plugin unavailable'); } },
+        origin: ORIGIN,
+        notifyError: message => errors.push(message),
+        logger: { error() {} },
+        secretFactory: () => 'blocked',
+    });
+    await assert.rejects(hook(data), /Plugin unavailable/);
+    assert.match(data.reverse_proxy, /^vertex-paygo-blocked:/);
+    assert.equal(data.proxy_password, 'blocked');
+    assert.match(errors[0], /not sent to Google/);
+});
+
+test('invalid tier/region state is blocked before prepare', async () => {
+    const errors = [];
+    let prepares = 0;
+    const data = vertexData({ vertexai_region: 'us-central1' });
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.FLEX, paygoOnly: false }),
+        serverClient: { prepare: async () => prepares++ },
+        origin: ORIGIN,
+        notifyError: message => errors.push(message),
+        localize: (key, parameters = {}) => key === 'vertex_paygo.validation.global_required'
+            ? `${parameters.tier} 必须使用 global`
+            : key === 'vertex_paygo.tier.flex' ? 'Flex（灵活）' : key,
+        logger: { error() {} },
+    });
+    await assert.rejects(hook(data), { code: 'TIER_REQUIRES_GLOBAL', message: 'Flex（灵活） 必须使用 global' });
+    assert.equal(prepares, 0);
+    assert.match(data.reverse_proxy, /^vertex-paygo-blocked:/);
+    assert.equal(errors[0], 'Flex（灵活） 必须使用 global');
+});
+
+test('unverified model warning is shown only once per model in a page session', async () => {
+    const warnings = [];
+    let prepares = 0;
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.FLEX, paygoOnly: false }),
+        serverClient: {
+            prepare: async () => {
+                prepares += 1;
+                return { proxyUrl: 'http://127.0.0.1:32145/proxy/ticket', proxySecret: 'secret' };
+            },
+        },
+        origin: ORIGIN,
+        notifyWarning: message => warnings.push(message),
+    });
+
+    await hook(vertexData({ model: 'gemini-9.0-future' }));
+    await hook(vertexData({ model: 'gemini-9.0-future' }));
+    await hook(vertexData({ model: 'gemini-9.1-future' }));
+
+    assert.equal(prepares, 3);
+    assert.equal(warnings.length, 2);
+    assert.equal(warnings[0], warnings[1]);
+});
+
+test('pre-existing custom Vertex reverse proxy conflicts fail closed', async () => {
+    const errors = [];
+    let prepares = 0;
+    const data = vertexData({ reverse_proxy: 'https://user-proxy.example', proxy_password: 'user-secret' });
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.PRIORITY, paygoOnly: false }),
+        serverClient: { prepare: async () => prepares++ },
+        origin: ORIGIN,
+        notifyError: message => errors.push(message),
+        logger: { error() {} },
+        secretFactory: () => 'blocked-conflict',
+    });
+    await assert.rejects(hook(data), { code: 'CUSTOM_REVERSE_PROXY_CONFLICT' });
+    assert.equal(prepares, 0);
+    assert.equal(data.reverse_proxy, 'vertex-paygo-blocked://request');
+    assert.equal(data.proxy_password, 'blocked-conflict');
+    assert.match(errors[0], /Vertex AI.*custom reverse proxy/i);
+});
+
+test('payload builder supplies safe defaults for optional Vertex fields', () => {
+    assert.deepEqual(buildPreparePayload(vertexData({
+        stream: 0,
+        vertexai_auth_mode: ' FULL ',
+        vertexai_region: ' GLOBAL ',
+        vertexai_express_project_id: ' project-id ',
+    }), { tier: TIER.STANDARD, paygoOnly: true }), {
+        protocolVersion: 2,
+        chat_completion_source: 'vertexai',
+        model: 'gemini-3.1-pro-preview',
+        stream: false,
+        vertexai_auth_mode: 'full',
+        vertexai_region: 'global',
+        vertexai_express_project_id: 'project-id',
+        tier: TIER.STANDARD,
+        paygoOnly: true,
+    });
+});
+
+test('failure sink always installs a non-empty secret', () => {
+    const data = {};
+    installFailureSink(data, ORIGIN, () => '');
+    assert.equal(data.proxy_password, 'blocked');
+});
+
+test('failure sink itself cannot throw and retains a non-network URL', () => {
+    const data = {};
+    assert.doesNotThrow(() => installFailureSink(data, 'not a URL', () => { throw new Error('rng failed'); }));
+    assert.equal(data.reverse_proxy, 'vertex-paygo-blocked://request');
+    assert.equal(data.proxy_password, 'blocked');
+});
+
+test('failure sink never calls the ST HTTP server even with a valid origin', async () => {
+    const data = {};
+    installFailureSink(data, ORIGIN);
+    assert.equal(new URL(data.reverse_proxy).protocol, 'vertex-paygo-blocked:');
+    // Model the host appending its Google path before the server-side fetch.
+    await assert.rejects(fetch(`${data.reverse_proxy}/v1/publishers/google/models/gemini-2.5-pro:generateContent`, {
+        method: 'POST', body: '{}',
+    }), error => error.cause?.message === 'unknown scheme');
+});
+
+test('notification and logging failures cannot replace the preparation error', async () => {
+    const failure = Object.assign(new Error('The requested Google credential was not found.'), { code: 'EXPLICIT_SECRET_NOT_FOUND' });
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.STANDARD }),
+        serverClient: { prepare: async () => { throw failure; } },
+        origin: ORIGIN,
+        notifyError: () => { throw new Error('notification failed'); },
+        logger: { error() { throw new Error('logging failed'); }, event() { throw new Error('event failed'); } },
+    });
+    await assert.rejects(hook(vertexData()), error => error === failure);
+});
+
+test('failure sink does not propagate hostile property setters', () => {
+    const data = new Proxy({}, { set() { throw new Error('setter failed'); } });
+    assert.doesNotThrow(() => installFailureSink(data, ORIGIN, () => 'secret'));
+});
+
+test('structured request events cover preparation without exposing proxy credentials', async () => {
+    const events = [];
+    const logger = {
+        createRequestId: () => 'request-1',
+        event: (level, event, context) => events.push({ level, event, context }),
+        error() {},
+    };
+    const data = vertexData();
+    const hook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.FLEX, paygoOnly: true }),
+        serverClient: {
+            prepare: async () => ({
+                proxyUrl: `http://127.0.0.1:32145/proxy/${'a'.repeat(32)}`,
+                proxySecret: 'proxy-secret-value',
+                ticket: 'a'.repeat(32),
+            }),
+        },
+        origin: ORIGIN,
+        logger,
+    });
+
+    await hook(data);
+    assert.deepEqual(events.map(entry => entry.event), [
+        'request.prepare_started',
+        'request.prepare_succeeded',
+    ]);
+    assert.equal(events[0].context.requestId, 'request-1');
+    assert.equal(events[0].context.model, 'gemini-3.1-pro-preview');
+    assert.equal(events[1].context.phase, 'succeeded');
+    const serialized = JSON.stringify(events);
+    assert.doesNotMatch(serialized, /proxy-secret-value/u);
+    assert.doesNotMatch(serialized, new RegExp('a{32}', 'u'));
+    assert.doesNotMatch(serialized, /proxyUrl|proxySecret|proxy_password|ticket/u);
+});
+
+test('blocked and failed preparations emit stable error metadata only', async () => {
+    const blockedEvents = [];
+    const blockedHook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.FLEX, paygoOnly: false }),
+        serverClient: { prepare: async () => assert.fail('prepare should not run') },
+        origin: ORIGIN,
+        logger: {
+            createRequestId: () => 'request-blocked',
+            event: (level, event, context) => blockedEvents.push({ level, event, context }),
+            error() {},
+        },
+    });
+    await assert.rejects(blockedHook(vertexData({ model: 'claude-3-7-sonnet' })), { code: 'PAYGO_REQUIRES_GEMINI' });
+    assert.equal(blockedEvents[1].event, 'request.blocked');
+    assert.equal(blockedEvents[1].context.model, 'claude-3-7-sonnet');
+    assert.equal(blockedEvents[1].context.errorCode, 'PAYGO_REQUIRES_GEMINI');
+
+    const failedEvents = [];
+    const failedHook = createRequestHook({
+        stateProvider: () => ({ tier: TIER.PRIORITY, paygoOnly: false }),
+        serverClient: {
+            prepare: async () => {
+                const error = new Error('secret-bearing detail');
+                error.code = 'UNAVAILABLE';
+                error.status = 503;
+                throw error;
+            },
+        },
+        origin: ORIGIN,
+        logger: {
+            createRequestId: () => 'request-failed',
+            event: (level, event, context) => failedEvents.push({ level, event, context }),
+            error() {},
+        },
+    });
+    await assert.rejects(failedHook(vertexData()), { code: 'UNAVAILABLE', status: 503 });
+    const failure = failedEvents.at(-1);
+    assert.equal(failure.event, 'request.prepare_failed');
+    assert.equal(failure.context.errorCode, 'UNAVAILABLE');
+    assert.equal(failure.context.statusCode, 503);
+    assert.doesNotMatch(JSON.stringify(failure), /secret-bearing detail/u);
+});

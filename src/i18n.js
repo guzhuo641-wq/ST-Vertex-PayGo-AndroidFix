@@ -1,0 +1,402 @@
+/*
+ * Copyright (c) 2026 Mana Nekoha
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+import { PROTOCOL_VERSION, REQUIRED_TRANSPORT } from './constants.js';
+import { MODEL_POLICY_SNAPSHOT } from './model-policy.js';
+
+export const MESSAGES = Object.freeze({
+    'vertex_paygo.gemini4.server_upgrade': 'Gemini 4 compatibility requires the updated server plugin. Update the server plugin and restart SillyTavern.',
+    'vertex_paygo.backup.open': 'Restore PayGo data',
+    'vertex_paygo.backup.title': 'Restore PayGo data',
+    'vertex_paygo.backup.description': 'PayGo saves changed data at startup and before updates or restoration. Older snapshots rotate using the host backup count. These are local recovery points, not continuous or off-device backups.',
+    'vertex_paygo.backup.choose': 'Choose a data snapshot',
+    'vertex_paygo.backup.restore': 'Restore after restart',
+    'vertex_paygo.backup.close': 'Close',
+    'vertex_paygo.backup.more': 'Load older snapshots',
+    'vertex_paygo.backup.empty': 'No PayGo data snapshots are available yet.',
+    'vertex_paygo.backup.damaged': 'Cannot restore',
+    'vertex_paygo.backup.queued': 'Restore scheduled. Restart the host and refresh this page to apply it. Until then, current data is unchanged.',
+    'vertex_paygo.backup.restored': 'Restoration completed. If a pre-restore snapshot is listed, select it to undo this operation.',
+    'vertex_paygo.backup.failed': 'The backup or restore could not finish: {code}. Existing snapshots were kept.',
+    'vertex_paygo.backup.confirm': 'After the next restart, this snapshot will replace the PayGo ledger and bridge configuration, including the bridge enabled state and access key. Newer ledger entries will not be merged. Current files will be saved before restoration. Continue?',
+    'vertex_paygo.backup.cancel_restore': 'Cancel scheduled restore',
+    'vertex_paygo.backup.cancelled': 'The scheduled restore was cancelled. Current data is unchanged.',
+    'vertex_paygo.backup.ledger': 'Usage ledger',
+    'vertex_paygo.backup.bridge': 'Bridge configuration',
+    'vertex_paygo.backup.reason.startup': 'Startup',
+    'vertex_paygo.backup.reason.update': 'Before update',
+    'vertex_paygo.backup.reason.before-restore': 'Before restore',
+    'vertex_paygo.settings.tab.general': 'General',
+    'vertex_paygo.settings.tab.bridge': 'Bridge',
+    'vertex_paygo.settings.tab.pricing': 'Pricing',
+    'vertex_paygo.settings.group.display': 'Message cost display',
+    'vertex_paygo.settings.group.maintenance': 'Logs & maintenance',
+    'vertex_paygo.update.title': 'Component updates',
+    'vertex_paygo.update.check': 'Check for updates',
+    'vertex_paygo.update.apply': 'Update now',
+    'vertex_paygo.update.checking': 'Checking both components…',
+    'vertex_paygo.update.available': 'A paired update is available: {target}',
+    'vertex_paygo.update.available_commit': 'A newer revision is available on {branch}: {commit}',
+    'vertex_paygo.update.uptodate': 'Both components are current.',
+    'vertex_paygo.update.blocked': 'Update unavailable: {reason}',
+    'vertex_paygo.update.running': 'Updating: {phase}…',
+    'vertex_paygo.update.done': 'Updated. Restart the host and refresh this page to load the new version; the one running now is still the previous one.',
+    'vertex_paygo.update.failed': 'Update failed: {message}',
+    'vertex_paygo.update.origin_mismatch': 'This copy was installed from another remote ({origin}); updates always come from the official repository.',
+    'vertex_paygo.update.upgrade': 'Update the Server Plugin to manage component updates from this panel.',
+    'vertex_paygo.update.phase.checking': 'checking the published release',
+    'vertex_paygo.update.phase.preparing': 'downloading and verifying',
+    'vertex_paygo.update.phase.activating': 'replacing files',
+    'vertex_paygo.update.notice': 'Updates both components to the same release the command-line updater would choose, keeping the tracked branch, protecting local changes, and backing up the previous files. The host is left running; restart it to load the new version. The host setting enableServerPluginsAutoUpdate is not changed.',
+    'vertex_paygo.update.popup.title': 'Update both components?',
+    'vertex_paygo.update.popup.body': 'The frontend extension and the server plugin will be replaced together with {target}. The previous files are backed up, and the host must be restarted afterwards.',
+    'vertex_paygo.update.popup.accept': 'Update now',
+    'vertex_paygo.update.popup.decline': 'Cancel',
+    "vertex_paygo.bridge.sections.policy": "Vertex protocol & service tier",
+    "vertex_paygo.bridge.mode.label": "Upstream protocol",
+    "vertex_paygo.bridge.mode.openai": "Official OpenAI API (default)",
+    "vertex_paygo.bridge.mode.gemini": "Gemini conversion gateway (opt in)",
+    "vertex_paygo.bridge.tier_source.label": "Service tier source",
+    "vertex_paygo.bridge.tier_source.independent": "Independent setting",
+    "vertex_paygo.bridge.tier_source.follow": "Follow main API",
+    "vertex_paygo.bridge.tier.label": "Independent service tier",
+    "vertex_paygo.bridge.policy.apply": "Apply protocol and tier",
+    "vertex_paygo.bridge.policy.guidance": "Vertex only. Native OpenAI mode does not support Flex. The optional gateway converts OpenAI requests and Gemini responses, including streams. Flex and Priority require the bound Vertex region to be global. Unsupported inputs fail explicitly; no protocol or tier fallback.",
+    "vertex_paygo.bridge.policy.follow_hint": "Follow mode reads the main Vertex API tier from the latest settings saved by ST/Luker for each request. It does not change the bound account, model or region. After changing the main settings, allow the host to save them; Refresh status checks the saved tier. A non-Vertex main API or unreadable settings causes an error.",
+    "vertex_paygo.bridge.policy.upgrade": "Update the Server Plugin to configure the Vertex gateway and service tiers.",
+    "vertex_paygo.bridge.policy.no_flex": "Native Vertex OpenAI mode does not support Flex. Select the Gemini gateway or another tier.",
+    "vertex_paygo.bridge.policy.unsaved": "Changes are not applied. Apply protocol and tier to update the running bridge.",
+    "vertex_paygo.bridge.policy.on_enable": "These settings will be applied when you enable the bridge.",
+    "vertex_paygo.bridge.policy.effective": "Last checked effective tier: {tier}",
+    "vertex_paygo.message_cost.recent_count": "Show costs for recent chat messages",
+    "vertex_paygo.message_cost.recent_count.guidance": "Only display costs within the latest N chat messages (1–1000, default 20), counting user and system messages too. This only affects price display; historical usage and cost records are retained.",
+    "vertex_paygo.message_cost.placement": "Message cost position",
+    "vertex_paygo.message_cost.placement.footer": "Message footer (default)",
+    "vertex_paygo.message_cost.placement.header": "Message header",
+    "vertex_paygo.message_cost.placement.avatar": "Below avatar",
+    "vertex_paygo.message_cost.placement.hidden": "Hidden",
+    "vertex_paygo.message_cost.placement.guidance": "Applies globally to all chats and API sources. Hiding costs does not stop usage and cost recording.",
+    'vertex_paygo.bridge.logs.request_incomplete': 'Request body was not fully received.',
+    'vertex_paygo.bridge.logs.upstream_response': 'Raw Google upstream response',
+    "vertex_paygo.bridge.logs.title": "Bridge API logs",
+    "vertex_paygo.bridge.logs.refresh": "Refresh API logs",
+    "vertex_paygo.bridge.logs.clear": "Clear API logs",
+    "vertex_paygo.bridge.logs.guidance": "Requests, forwarded requests, responses and errors are captured automatically while the bridge is enabled. Logs contain prompts and outputs. Known credentials are excluded or redacted; retention is capped and truncated bodies are marked. Refresh to load logs; there is no automatic polling.",
+    "vertex_paygo.bridge.logs.upgrade": "Update the Server Plugin to view bridge API logs.",
+    "vertex_paygo.bridge.logs.loading": "Loading API logs…",
+    "vertex_paygo.bridge.logs.not_loaded": "Logs have not been loaded.",
+    "vertex_paygo.bridge.logs.loaded": "Logs loaded; newest requests first.",
+    "vertex_paygo.bridge.logs.empty": "No API logs.",
+    "vertex_paygo.bridge.logs.truncated": "Body truncated by the retention limit.",
+    "vertex_paygo.bridge.logs.interrupted": "Response interrupted.",
+    "vertex_paygo.bridge.logs.request": "Incoming request body",
+    "vertex_paygo.bridge.logs.forwarded": "Forwarded Google request body",
+    "vertex_paygo.bridge.logs.response": "Raw response body",
+    "vertex_paygo.bridge.logs.error": "Error",
+    "vertex_paygo.bridge.logs.no_body": "No body recorded.",
+
+    'vertex_paygo.costs.cache_hit_rate': 'Cache hit rate',
+    'vertex_paygo.costs.cache_hit_rate_hint': 'Cached tokens / input tokens',
+    "vertex_paygo.message_cost.label_amount": "≈ {amount}",
+    "vertex_paygo.message_cost.label_partial": "Partial ≈ {amount}",
+    "vertex_paygo.message_cost.label_pending": "Estimating cost",
+    "vertex_paygo.message_cost.label_unpriced": "Price needed",
+    "vertex_paygo.message_cost.label_unknown": "Cost unknown",
+    "vertex_paygo.message_cost.dialog_label": "Message cost details",
+    "vertex_paygo.message_cost.title": "Message usage and cost",
+    "vertex_paygo.message_cost.estimate_complete": "Complete estimate",
+    "vertex_paygo.message_cost.estimate_partial": "Available estimate",
+    "vertex_paygo.message_cost.close": "Close cost details",
+    "vertex_paygo.message_cost.input": "Input",
+    "vertex_paygo.message_cost.output_with_thinking": "Output (incl. thinking)",
+    "vertex_paygo.message_cost.output_reported": "Output (reported)",
+    "vertex_paygo.message_cost.output_breakdown": "Response {output} · Thinking {thinking}",
+    "vertex_paygo.message_cost.thinking_unreported": "Thinking usage not reported",
+    "vertex_paygo.message_cost.client_observed": "Observed by client",
+    "vertex_paygo.message_cost.stream_timing_missing": "Incomplete stream timing",
+    "vertex_paygo.message_cost.stream_only": "Streaming responses only",
+    "vertex_paygo.message_cost.generation_speed": "Generation speed",
+    "vertex_paygo.message_cost.local_cost": "Locally estimated cost",
+    "vertex_paygo.message_cost.cost_unavailable": "Cannot estimate",
+    "vertex_paygo.message_cost.current_price": "Includes current-price estimates",
+    "vertex_paygo.message_cost.thinking": "Thinking tokens",
+    "vertex_paygo.message_cost.cached": "Cached input",
+    "vertex_paygo.message_cost.uncached": "Uncached input",
+    "vertex_paygo.message_cost.first_content": "First content",
+    "vertex_paygo.message_cost.first_content_unavailable": "Non-streaming or not observed",
+    "vertex_paygo.message_cost.duration": "End-to-end duration",
+    "vertex_paygo.message_cost.end_to_end_speed": "End-to-end speed",
+    "vertex_paygo.message_cost.model_unknown": "Unknown model",
+    "vertex_paygo.message_cost.tier_unknown": "Unknown",
+    "vertex_paygo.message_cost.model_tier": "{model} · Tier: {tier}",
+    "vertex_paygo.message_cost.request_count": "Requests: {count}",
+    "vertex_paygo.message_cost.trigger_label": "View message cost: {cost}",
+    "vertex_paygo.message_cost.unit_tokens": "tokens",
+    "vertex_paygo.message_cost.unit_tps": "{value} tokens/s",
+    "vertex_paygo.message_cost.unit_ms": "{value} ms",
+    "vertex_paygo.message_cost.unit_seconds": "{value} s",
+    "vertex_paygo.message_cost.reason.pending": "Request is still processing",
+    "vertex_paygo.message_cost.reason.unavailable": "Usage polling ended without a result",
+    "vertex_paygo.message_cost.reason.usage_missing": "The service did not report usage",
+    "vertex_paygo.message_cost.reason.usage_incomplete": "The service reported incomplete usage",
+    "vertex_paygo.message_cost.reason.tauri_normalized": "TauriTavern non-streaming usage is normalized and may omit thinking or other details; this is a partial cost estimate",
+    "vertex_paygo.message_cost.reason.price_missing": "No price for this model and tier",
+    "vertex_paygo.message_cost.reason.long_price_missing": "Long-context pricing is unavailable",
+    "vertex_paygo.message_cost.reason.traffic_tier_mismatch": "Reported traffic tier differs from the request",
+    "vertex_paygo.message_cost.reason.provisioned_throughput": "Provisioned Throughput cannot be estimated with PayGo prices",
+    "vertex_paygo.message_cost.reason.unsupported_modality": "Includes non-text modalities not supported by this estimate",
+    "vertex_paygo.message_cost.reason.cache_exceeds_prompt": "Cached tokens exceed input tokens",
+    "vertex_paygo.message_cost.reason.amount_out_of_range": "Cost is outside the representable range",
+    "vertex_paygo.message_cost.reason.request_pending": "Request record is not complete yet",
+    "vertex_paygo.message_cost.reason.request_incomplete": "Request record is incomplete",
+    "vertex_paygo.message_cost.reason.request_failed": "Request failed; cost may be incomplete",
+    "vertex_paygo.message_cost.reason.tool_use": "Tool-use tokens may not be fully priced",
+    "vertex_paygo.message_cost.reason.timing_missing": "Complete client timing is unavailable",
+    'vertex_paygo.tauri.request_blocked': 'Native request failed: {message}',
+    'vertex_paygo.tauri.title': "Vertex AI PayGo · TauriTavern",
+    'vertex_paygo.tauri.native': "Requests use TauriTavern native authentication and transport. No companion server plugin is needed.",
+    'vertex_paygo.tauri.scope': "Configure:",
+    'vertex_paygo.tauri.current': "Current Chat Completion connection",
+    'vertex_paygo.tauri.refresh': "Refresh connections",
+    'vertex_paygo.tauri.controls_missing': "TauriTavern extension settings were not found.",
+    'vertex_paygo.tauri.target_missing': "The selected Model Target no longer exists. Refresh the connection list.",
+    'vertex_paygo.tauri.select_google': "Select a Google Vertex AI or Google AI Studio connection to configure its service tier.",
+    'vertex_paygo.tauri.applied': "Native request tier: {tier}. Flex failures are not retried as Standard by this extension.",
+    'vertex_paygo.tauri.persistence': "Changes are saved in native Additional Parameters or the selected Agent Model Target. Save your native preset to reuse them there. Disabling this extension does not remove saved parameters; select Standard and turn off PayGo-only to remove them.",
+    'vertex_paygo.tauri.cost_notice': "Non-streaming cost estimates may be inaccurate or too low because TauriTavern can omit thinking-token and other usage details.",
+    'vertex_paygo.tauri.cost_coverage': "TauriTavern: this ledger records ordinary chat and requests passing through compatible frontend send interfaces. Native Agent/sub-Agent model loops are not included. Non-streaming usage can omit thinking tokens and other details, so estimates may be inaccurate or too low.",
+    'vertex_paygo.tauri.cancel': "Cancel",
+    'vertex_paygo.tauri.settings_changed': "The connection changed while confirming. Review the current connection and select the tier again.",
+    'vertex_paygo.tauri.yaml_missing': "The host YAML library is unavailable. Native parameters could not be configured.",
+    'vertex_paygo.tauritavern.title': 'TauriTavern compatibility APIs are unavailable',
+    'vertex_paygo.tauritavern.unavailable': 'This build does not expose the native parameter or extension storage APIs required by Vertex AI PayGo. Update to a compatible TauriTavern build (tested with 2.3.0) and check that third-party extensions are allowed. Manual parameter instructions are provided below.',
+    'vertex_paygo.tauritavern.vertex_title': 'Google Vertex AI: Standard / Flex / Priority',
+    'vertex_paygo.tauritavern.vertex_steps': 'In TauriTavern 2.1.0 or later, open API Connections → Chat Completion → Google Vertex AI. Select a supported Gemini model and set Region to global for Flex or Priority. Click Additional Parameters beside Connect, then enter this YAML in Include Request Headers for Flex:',
+    'vertex_paygo.tauritavern.vertex_flex': 'X-Vertex-AI-LLM-Request-Type: shared\nX-Vertex-AI-LLM-Shared-Request-Type: flex',
+    'vertex_paygo.tauritavern.vertex_tiers': 'For Priority, change flex to priority. To return to Standard, remove X-Vertex-AI-LLM-Shared-Request-Type. Keep X-Vertex-AI-LLM-Request-Type: shared only if you want PayGo-only (bypass Provisioned Throughput); otherwise remove it too.',
+    'vertex_paygo.tauritavern.ai_studio_title': 'Google AI Studio: Standard / Flex',
+    'vertex_paygo.tauritavern.ai_studio_steps': 'Select Google AI Studio first, using a paid Gemini API account and a model that supports Flex. Open Additional Parameters → Include Body Parameters and add this YAML (no Vertex headers needed):',
+    'vertex_paygo.tauritavern.ai_studio_flex': 'service_tier: flex',
+    'vertex_paygo.tauritavern.ai_studio_standard': 'To return to Standard, remove the service_tier field. Google AI Studio does not need a Vertex region setting.',
+    'vertex_paygo.tauritavern.finish': 'Parameters are saved automatically for each API source; close the dialog when done. Preserve unrelated parameters. If these fields are missing, update TauriTavern to 2.1.0 or later. You can disable or uninstall this extension in Extensions.',
+    'vertex_paygo.tauritavern.close': 'Got it',
+    'vertex_paygo.costs.recording_unavailable': 'This request could not be added to the usage ledger. Conversation costs will be incomplete.',
+    'vertex_paygo.server_error.csrf': 'SillyTavern rejected the CSRF token (HTTP 403). Refresh the page and try again.',
+    'vertex_paygo.server_error.http_non_json': 'Server Plugin request failed (HTTP {status}); the server or reverse proxy returned no JSON error details.',
+    'vertex_paygo.title': 'Vertex AI PayGo',
+    'vertex_paygo.ai_studio.title': 'Google AI Studio Flex',
+    'vertex_paygo.ai_studio.guidance': 'Flex uses discounted token pricing and may take longer. A paid Gemini API account is required. Failed Flex requests will not automatically switch to Standard.',
+    'vertex_paygo.ai_studio.status': '{tier} will use Google AI Studio; no Vertex region setting is required.',
+    'vertex_paygo.ai_studio.tiers': 'This extension supports Standard and Flex for Google AI Studio.',
+    'vertex_paygo.service_tier': 'Service tier:',
+    'vertex_paygo.tier.standard': 'Standard',
+    'vertex_paygo.tier.flex': 'Flex',
+    'vertex_paygo.tier.priority': 'Priority',
+    'vertex_paygo.paygo_only': 'Use PayGo only (bypass Provisioned Throughput)',
+    'vertex_paygo.guidance': 'Flex may add significant latency and is intended for non-real-time work. Flex and Priority currently require the global endpoint.',
+    'vertex_paygo.server.checking': 'Server Plugin: checking…',
+    'vertex_paygo.server.ready': 'Server Plugin{version}: ready',
+    'vertex_paygo.server.ready_detail': 'Protocol v2, loopback HTTP transport and usage ledger',
+    'vertex_paygo.server.unavailable': 'Server Plugin: unavailable',
+    'vertex_paygo.retry': 'Retry',
+    'vertex_paygo.logs.view': 'View logs',
+    'vertex_paygo.logs.save': 'Save logs',
+    'vertex_paygo.logs.title': 'Vertex PayGo logs',
+    'vertex_paygo.logs.description': 'This server session includes client and server operational events. Review the log before sharing it.',
+    'vertex_paygo.logs.close': 'Close',
+    'vertex_paygo.logs.empty': 'No log entries are available for this server session.',
+    'vertex_paygo.logs.view_failed': 'Could not load logs: {error}',
+    'vertex_paygo.logs.save_failed': 'Could not save logs: {error}',
+    'vertex_paygo.status.model_unresolved': 'Waiting for SillyTavern to load the Google model.',
+    'vertex_paygo.status.non_gemini': 'PayGo routing is excluded for non-Gemini models.',
+    'vertex_paygo.status.blocked': 'Blocked: {message}',
+    'vertex_paygo.status.native_standard': 'Standard uses the Server Plugin to collect token usage; PayGo-only is not forced.',
+    'vertex_paygo.status.standard_paygo_only': 'Standard PayGo-only routing will bypass Provisioned Throughput.',
+    'vertex_paygo.status.tier_global': '{tier} PayGo will use the global endpoint.',
+    'vertex_paygo.error.persist': 'Could not persist the PayGo setting: {error}',
+    'vertex_paygo.error.controls_missing': 'SillyTavern Vertex AI controls were not found.',
+    'vertex_paygo.error.controls_timeout': 'Timed out waiting for SillyTavern Vertex AI controls.',
+    'vertex_paygo.error.context_unavailable': 'SillyTavern public extension context is unavailable.',
+    'vertex_paygo.error.paygo_only_gemini': 'PayGo-only routing is available only for Gemini models.',
+    'vertex_paygo.policy.gemini_only': 'PayGo tier controls are available only for native Gemini model IDs (gemini-*).',
+    'vertex_paygo.policy.native_standard': 'Standard Gemini requests use the Server Plugin to collect usage without changing their service tier.',
+    'vertex_paygo.policy.known': 'Supported for {tier} PayGo as of {date}.',
+    'vertex_paygo.policy.unsupported': 'This model is in the {date} PayGo snapshot, but not in the {tier} list.',
+    'vertex_paygo.policy.unverified': 'This Gemini model is not in the {date} snapshot; Google will perform the final validation.',
+    'vertex_paygo.validation.non_gemini': 'PayGo routing was requested for a non-Gemini model.',
+    'vertex_paygo.validation.global_required': '{tier} PayGo requires the global Vertex AI endpoint.',
+    'vertex_paygo.popup.tier_region.title': '{tier} PayGo requires global',
+    'vertex_paygo.popup.tier_region.body': 'The current Vertex AI region is “{region}”. Choose whether to switch both the service tier and region, or keep the current region with Standard.',
+    'vertex_paygo.popup.tier_region.accept': 'Use {tier} and global',
+    'vertex_paygo.popup.tier_region.decline': 'Keep region and Standard',
+    'vertex_paygo.popup.region.title': 'Regional endpoints use Standard',
+    'vertex_paygo.popup.region.body': '{tier} PayGo currently requires global. Keep the new region with Standard, or keep global with the current tier.',
+    'vertex_paygo.popup.region.accept': 'Use new region and Standard',
+    'vertex_paygo.popup.region.decline': 'Keep global and {tier}',
+    'vertex_paygo.popup.model.reason_gemini': 'PayGo routing is restricted to Gemini models.',
+    'vertex_paygo.popup.model.reason_unsupported': 'The selected model does not support this PayGo tier.',
+    'vertex_paygo.popup.model.title': 'Model and PayGo tier conflict',
+    'vertex_paygo.popup.model.body': '{reason} Use the new model with Standard, or restore the previous model and keep the PayGo setting.',
+    'vertex_paygo.popup.model.accept': 'Use new model and Standard',
+    'vertex_paygo.popup.model.decline': 'Restore previous model',
+    'vertex_paygo.popup.saved.title': 'Saved PayGo setting is incompatible',
+    'vertex_paygo.popup.saved.body': '{message} Switch this connection to Standard, or keep the saved setting blocked until you change the model.',
+    'vertex_paygo.popup.saved.accept': 'Use Standard',
+    'vertex_paygo.popup.saved.decline': 'Keep blocked setting',
+    'vertex_paygo.hook.proxy_conflict': 'Vertex AI PayGo is incompatible with a custom reverse proxy. Disable the reverse proxy before generating.',
+    'vertex_paygo.hook.request_blocked': '{message} The request was blocked and was not sent to Google.',
+    'vertex_paygo.server_error.invalid_proxy_url': 'Server Plugin returned an invalid proxy URL.',
+    'vertex_paygo.server_error.unsafe_proxy_url': 'Server Plugin proxy URL is not an authenticated loopback HTTP endpoint.',
+    'vertex_paygo.server_error.invalid_response': 'Server Plugin returned a non-JSON response.',
+    'vertex_paygo.server_error.invalid_log_response': 'Server Plugin returned an invalid log response.',
+    'vertex_paygo.server_error.log_too_large': 'Server Plugin log exceeds the {size} limit.',
+    'vertex_paygo.server_error.http': 'Server Plugin request failed: {message}',
+    'vertex_paygo.server_error.timeout': 'Server Plugin request timed out.',
+    'vertex_paygo.server_error.unavailable': 'Server Plugin is unavailable.',
+    'vertex_paygo.server_error.protocol': 'Server Plugin protocol v{version} is required.',
+    'vertex_paygo.server_error.transport': 'Server Plugin transport “{transport}” is required.',
+    'vertex_paygo.server_error.ticket': 'Server Plugin ticket does not match its proxy URL.',
+    'vertex_paygo.server_error.secret': 'Server Plugin returned an invalid proxy secret.',
+    'vertex_paygo.bridge.title': 'Google OpenAI-compatible bridge',
+    'vertex_paygo.bridge.sections.setup': 'Client connection details',
+    'vertex_paygo.bridge.sections.advanced': 'Connection management & Debug',
+    'vertex_paygo.bridge.sections.advanced_debug': 'Connection management & Debug (on)',
+    'vertex_paygo.bridge.sections.help': 'Usage & limitations',
+    'vertex_paygo.bridge.enable': 'Enable bridge',
+    'vertex_paygo.bridge.disable': 'Disable bridge',
+    'vertex_paygo.bridge.refresh': 'Refresh status',
+    'vertex_paygo.bridge.update': 'Update to current connection',
+    'vertex_paygo.bridge.rotate': 'Rotate API key',
+    'vertex_paygo.bridge.base_url': 'Base URL',
+    'vertex_paygo.bridge.api_key': 'Bridge API key',
+    'vertex_paygo.bridge.model': 'Model',
+    'vertex_paygo.bridge.copy': 'Copy',
+    'vertex_paygo.bridge.show': 'Show',
+    'vertex_paygo.bridge.hide': 'Hide',
+    'vertex_paygo.bridge.copy_model': 'Copy model',
+    'vertex_paygo.bridge.copy_failed': 'Could not copy to clipboard.',
+    'vertex_paygo.bridge.status_on_persistent': 'Bridge enabled. It will restore automatically at the next host startup.',
+    'vertex_paygo.bridge.status_on': 'Bridge enabled for this server session.',
+    'vertex_paygo.bridge.status_off': 'Bridge disabled.',
+    'vertex_paygo.bridge.status_unavailable': 'Bridge status unknown. Refresh to check.',
+    'vertex_paygo.bridge.connection': 'Fixed connection: {source} · {model} · {region}',
+    'vertex_paygo.bridge.current': 'Current connection: {source} · {model}',
+    'vertex_paygo.bridge.debug': "Debug: allow localhost browser calls",
+    'vertex_paygo.bridge.debug_guidance': "Allows pages served over HTTP(S) from localhost, 127.0.0.1 or [::1]. The bridge API key is still required. Local CLI clients already work without Debug. Debug settings are saved with the enabled bridge and restored at startup.",
+    'vertex_paygo.bridge.debug_upgrade': "Update the Server Plugin to use localhost browser Debug access.",
+    'vertex_paygo.bridge.guidance': "Enter this Base URL and API key manually in an OpenAI-compatible client. st-current uses the bound connection model. /models lists Gemini candidates from Google’s catalog; you can also specify a model explicitly. Changing your main connection does not update this bridge; use Update to current connection.",
+    "vertex_paygo.bridge.limitations": "Defaults to Google’s official OpenAI-compatible API. Vertex can opt into a Gemini conversion gateway; AI Studio is unchanged. Catalog listing does not guarantee model support. No automatic fallback or account-safety guarantee. Local server and CLI clients work; Debug allows localhost pages with the bridge key. The host saves the bridge switch and bound configuration. An enabled bridge restores at startup with the same API key and fixed Base URL. If its saved Google credential is unavailable, locally invalid or changed on a legacy host, restoration leaves the bridge disabled; it never switches to the current main connection.",
+    'vertex_paygo.bridge.tauri_unavailable': 'The Google OpenAI-compatible bridge is unavailable in TauriTavern. Native PayGo controls remain available.',
+    'vertex_paygo.bridge.upgrade': 'Update the Server Plugin to use the Google OpenAI-compatible bridge.',
+    'vertex_paygo.bridge.invalid_response': 'Server Plugin returned an invalid bridge response.',
+    'vertex_paygo.bridge.validation.source': 'Select Google AI Studio or Vertex AI to enable or update the bridge.',
+    'vertex_paygo.bridge.validation.proxy': 'Disable the custom reverse proxy before enabling the bridge.',
+    'vertex_paygo.bridge.validation.model': 'Select a native Gemini model before enabling the bridge.',
+    'vertex_paygo.bridge.validation.express': 'Vertex AI Express is unsupported. Select full service-account authentication.',
+    'vertex_paygo.bridge.validation.region': 'Select a valid Vertex AI region before enabling the bridge.',
+    'vertex_paygo.bridge.active_secret_unavailable': 'No valid active Google credential is available. Select one in connection settings, then refresh.',
+});
+
+export function formatMessage(message, parameters = {}) {
+    return String(message).replace(/\{([a-zA-Z0-9_]+)\}/gu, (match, name) => (
+        Object.hasOwn(parameters, name) ? String(parameters[name]) : match
+    ));
+}
+
+export function createLocalizer(translate = undefined) {
+    const translateImpl = typeof translate === 'function' ? translate : (fallback => fallback);
+    return (key, parameters = {}) => {
+        const fallback = MESSAGES[key] ?? key;
+        let localized = fallback;
+        try {
+            const translated = translateImpl(fallback, key);
+            if (typeof translated === 'string' && translated.length > 0) {
+                localized = translated;
+            }
+        } catch {
+            // Localization must never prevent the extension from loading.
+        }
+        return formatMessage(localized, parameters);
+    };
+}
+
+export function getTierLabel(localize, tier) {
+    const key = `vertex_paygo.tier.${tier}`;
+    return localize(key);
+}
+
+export function localizeSupport(localize, support, tier) {
+    const tierLabel = getTierLabel(localize, tier);
+    const snapshot = support?.snapshot ?? MODEL_POLICY_SNAPSHOT;
+    switch (support?.level) {
+        case 'unavailable':
+            return localize('vertex_paygo.ai_studio.tiers');
+        case 'excluded':
+            return localize('vertex_paygo.policy.gemini_only');
+        case 'native':
+            return localize('vertex_paygo.policy.native_standard');
+        case 'known':
+            return localize('vertex_paygo.policy.known', { tier: tierLabel, date: snapshot });
+        case 'unsupported':
+            return localize('vertex_paygo.policy.unsupported', { tier: tierLabel, date: snapshot });
+        case 'unverified':
+            return localize('vertex_paygo.policy.unverified', { date: snapshot });
+        default:
+            return String(support?.reason ?? '');
+    }
+}
+
+export function localizeValidation(localize, validation, state = undefined) {
+    switch (validation?.code) {
+        case 'PAYGO_REQUIRES_GEMINI':
+            return localize('vertex_paygo.validation.non_gemini');
+        case 'MODEL_UNSUPPORTED':
+            return localizeSupport(localize, validation.support, state?.tier);
+        case 'TIER_REQUIRES_GLOBAL':
+            return localize('vertex_paygo.validation.global_required', {
+                tier: getTierLabel(localize, state?.tier),
+            });
+        default:
+            return String(validation?.message ?? '');
+    }
+}
+
+export function localizeError(
+    localize,
+    error,
+    { protocolVersion = PROTOCOL_VERSION, transport = REQUIRED_TRANSPORT } = {},
+) {
+    const keyByCode = {
+        CSRF_REJECTED: 'vertex_paygo.server_error.csrf',
+        INVALID_PROXY_URL: 'vertex_paygo.server_error.invalid_proxy_url',
+        UNSAFE_PROXY_URL: 'vertex_paygo.server_error.unsafe_proxy_url',
+        INVALID_RESPONSE: 'vertex_paygo.server_error.invalid_response',
+        INVALID_LOG_RESPONSE: 'vertex_paygo.server_error.invalid_log_response',
+        LOG_TOO_LARGE: 'vertex_paygo.server_error.log_too_large',
+        TIMEOUT: 'vertex_paygo.server_error.timeout',
+        UNAVAILABLE: 'vertex_paygo.server_error.unavailable',
+        PROTOCOL_MISMATCH: 'vertex_paygo.server_error.protocol',
+        TRANSPORT_MISMATCH: 'vertex_paygo.server_error.transport',
+        INVALID_PROXY_TICKET: 'vertex_paygo.server_error.ticket',
+        INVALID_PROXY_SECRET: 'vertex_paygo.server_error.secret',
+    };
+
+    if (error?.code === 'HTTP_ERROR') {
+        if (error.responseFormat === 'non-json') return localize('vertex_paygo.server_error.http_non_json', { status: error.status });
+        const details = [error.status ? `HTTP ${error.status}` : '', error.serverCode].filter(Boolean).join(' / ');
+        return localize('vertex_paygo.server_error.http', {
+            message: `${error instanceof Error ? error.message : String(error)}${details ? ` (${details})` : ''}`,
+        });
+    }
+
+    const key = keyByCode[error?.code];
+    if (key) {
+        return localize(key, { version: protocolVersion, transport, size: '5 MiB' });
+    }
+    return error instanceof Error ? error.message : String(error);
+}

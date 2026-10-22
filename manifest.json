@@ -1,0 +1,20 @@
+{
+  "display_name": "Vertex AI PayGo Tiers",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "generate_interceptor": "vertexPayGoGemini4GenerateInterceptor",
+  "css": "style.css",
+  "author": "Mana Nekoha (@mananekoha114)",
+  "version": "0.6.0",
+  "i18n": {
+    "default": "locales/en.json",
+    "en": "locales/en.json",
+    "zh-cn": "locales/zh-cn.json",
+    "zh-tw": "locales/zh-tw.json"
+  },
+  "hooks": {
+    "activate": "init"
+  }
+}
