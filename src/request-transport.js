@@ -1,12 +1,32 @@
 /* Copyright (c) 2026 Mana Nekoha
  * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. https://mozilla.org/MPL/2.0/ */
+ * License, v. 2.0. https://mozilla.org/MPL/2.0/.
+ *
+ * Patched for SillyDroid / Android WebView compatibility:
+ * On Android System WebView, response.clone() and ReadableStream construction
+ * cause the entire SSE stream to be buffered before any data reaches SillyTavern.
+ * The fix detects Android WebView and skips all response post-processing
+ * (signature observation, cost timing) that touches response.body or response.clone().
+ */
 
 import { DEFAULT_STATE, EXTENSION_ID, isGoogleSource } from './constants.js';
 import { createRequestHook, installFailureSink } from './request-hook.js';
 import { normalizeState, requiresPlugin } from './state-machine.js';
 import { enrichGemini4ModelList, getGemini4RequestTarget, isNativeGemini4Request } from './gemini4-request.js';
 import { createGemini4SignatureTracker } from './gemini4-signatures.js';
+
+function isAndroidWebView() {
+    try {
+        const ua = globalThis.navigator?.userAgent || '';
+        if (!/Android/i.test(ua)) return false;
+        if (/Gecko\/\d/i.test(ua) && /Firefox\//i.test(ua)) return false;
+        if (/\bwv\b/i.test(ua) || /WebView/i.test(ua)) return true;
+        if (/Chrome\//i.test(ua) && /Android/i.test(ua) && !/Firefox\//i.test(ua)) return true;
+        return false;
+    } catch {
+        return false;
+    }
+}
 
 const REQUEST_STATE = '__vertexPayGoRequestState';
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
@@ -131,6 +151,16 @@ export function installRequestTransport({ context, stateProvider, target = globa
             signal?.throwIfAborted();
             if (costToken) observe('started', costToken);
             const response = await originalFetch.call(this, requestTarget, { ...init, body: JSON.stringify(data) });
+
+            // PATCH: On Android WebView, any operation that touches response.body
+            // (clone(), getReader(), ReadableStream construction) will buffer the
+            // entire SSE stream. Skip ALL response post-processing and return the
+            // raw response immediately so SillyTavern can stream it directly.
+            if (isAndroidWebView()) {
+                if (costToken) observe('failed', costToken); // Mark cost as failed (no timing data)
+                return response; // Return raw response — streaming works!
+            }
+
             if (signatureToken) {
                 try { await signatures.observe(signatureToken, response); }
                 catch (error) { console.warn('[Vertex PayGo] Could not preserve the native Gemini signature.', error); }

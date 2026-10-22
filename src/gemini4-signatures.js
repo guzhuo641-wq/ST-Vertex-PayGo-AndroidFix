@@ -1,24 +1,6 @@
 /* Copyright (c) 2026 Mana Nekoha
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. https://mozilla.org/MPL/2.0/.
- *
- * Patched for SillyDroid / Android WebView compatibility:
- * On Android System WebView, response.clone() locks the body stream until
- * the clone is fully consumed, which blocks streaming. Skip clone on Android.
- */
-
-function isAndroidWebView() {
-    try {
-        const ua = globalThis.navigator?.userAgent || '';
-        if (!/Android/i.test(ua)) return false;
-        if (/Gecko\/\d/i.test(ua) && /Firefox\//i.test(ua)) return false;
-        if (/\bwv\b/i.test(ua) || /WebView/i.test(ua)) return true;
-        if (/Chrome\//i.test(ua) && /Android/i.test(ua) && !/Firefox\//i.test(ua)) return true;
-        return false;
-    } catch {
-        return false;
-    }
-}
+ * This Source Code Form is subject to the Mozilla Public
+ * License, v. 2.0. https://mozilla.org/MPL/2.0/ */
 
 // ST 1.18's non-streaming signature extractor returns from inside forEach.
 // Bind the plugin's complete native signature to the exact chat being generated
@@ -56,10 +38,6 @@ export function createGemini4SignatureTracker({ getContext, context }) {
         },
         async observe(token, response) {
             if (!token || !response?.ok || typeof response.clone !== 'function') return;
-            // PATCH: On Android WebView, response.clone() locks the body stream
-            // until the clone is fully consumed, blocking streaming for SillyTavern.
-            // Skip signature observation entirely on Android to preserve streaming.
-            if (isAndroidWebView()) return;
             const data = await response.clone().json();
             if (token.epoch === epoch && typeof data.nativeGeminiSignature === 'string') {
                 pending = { ...token, signature: data.nativeGeminiSignature };

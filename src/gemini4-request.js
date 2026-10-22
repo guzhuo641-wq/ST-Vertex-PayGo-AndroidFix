@@ -1,6 +1,9 @@
 /* Copyright (c) 2026 Mana Nekoha
- * This Source Code Form is subject to the Mozilla Public
- * License, v. 2.0. https://mozilla.org/MPL/2.0/ */
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. https://mozilla.org/MPL/2.0/.
+ *
+ * Patched for SillyDroid / Android WebView: skip response.clone() on Android.
+ */
 
 import { isGoogleSource } from './constants.js';
 
@@ -8,8 +11,23 @@ export const GEMINI4_NATIVE_ROUTE = '/api/plugins/vertex-paygo/native-gemini/gen
 export const GEMINI4_MODEL_LIMIT = 1048576;
 const models = ['gemini-4-argon', 'gemini-4-argon-cyber-permissive'];
 
+function isAndroidWebView() {
+    try {
+        const ua = globalThis.navigator?.userAgent || '';
+        if (!/Android/i.test(ua)) return false;
+        if (/Gecko\/\d/i.test(ua) && /Firefox\//i.test(ua)) return false;
+        if (/\bwv\b/i.test(ua) || /WebView/i.test(ua)) return true;
+        if (/Chrome\//i.test(ua) && /Android/i.test(ua) && !/Firefox\//i.test(ua)) return true;
+        return false;
+    } catch {
+        return false;
+    }
+}
+
 export async function enrichGemini4ModelList(response) {
     if (!response?.ok || typeof response.clone !== 'function') return response;
+    // PATCH: On Android WebView, response.clone() locks the body stream.
+    if (isAndroidWebView()) return response;
     let data;
     try { data = await response.clone().json(); } catch { return response; }
     if (!Array.isArray(data?.data)) return response;
